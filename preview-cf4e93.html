@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kimi for Excel</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 14px; font-size: 13px; color: #1f2328; background: #fafafa; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .sub { color: #6a737d; font-size: 12px; margin-bottom: 12px; }
+  label { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 12px; }
+  input, select, textarea, button { width: 100%; padding: 7px 9px; border: 1px solid #d0d7de; border-radius: 6px; font-size: 13px; font-family: inherit; background: #fff; }
+  textarea { min-height: 90px; resize: vertical; }
+  button { cursor: pointer; font-weight: 600; }
+  .btn-primary { background: #1f2328; color: #fff; border-color: #1f2328; margin-top: 10px; }
+  .btn-primary:disabled { opacity: .5; cursor: default; }
+  .btn-secondary { background: #fff; margin-top: 8px; }
+  #status { margin-top: 10px; font-size: 12px; color: #6a737d; white-space: pre-wrap; }
+  #status.err { color: #cf222e; }
+  #answer { margin-top: 12px; padding: 10px; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; min-height: 40px; white-space: pre-wrap; font-size: 12.5px; display: none; }
+  .row { display: flex; gap: 8px; }
+  .row > div { flex: 1; }
+  .note { font-size: 11px; color: #8a919c; margin-top: 3px; }
+  .mode-open .only-sub { display: none; }
+  .mode-sub .only-open { display: none; }
+</style>
+</head>
+<body>
+  <h1>Kimi for Excel</h1>
+  <div class="sub">Ваш ключ → модель Kimi прямо в Excel. Без посредников.</div>
+
+  <label for="mode">Источник ключа</label>
+  <select id="mode">
+    <option value="open">Open Platform — помегабайтная оплата</option>
+    <option value="sub">Подписка Kimi Code (Kimi for Coding)</option>
+  </select>
+  <div class="note only-open">Ключ из platform.kimi.ai, оплата по факту запросов.</div>
+  <div class="note only-sub">Ключ из консоли Kimi Code (kimi.com/code). Использование вне сценариев программирования — на ваш риск.</div>
+
+  <label for="apiKey">API-ключ</label>
+  <input type="password" id="apiKey" placeholder="sk-...">
+  <div class="note">Хранится только в вашем браузере (localStorage). Запросы идут напрямую на серверы Kimi.</div>
+
+  <label for="model">Модель</label>
+  <select id="model"></select>
+
+  <div class="only-sub">
+    <label for="effort">Thinking effort (k3)</label>
+    <select id="effort">
+      <option value="low">low (дёшево/быстро)</option>
+      <option value="high">high</option>
+      <option value="max">max</option>
+    </select>
+  </div>
+  <div class="only-open">
+    <label for="effortOpen">Thinking effort (kimi-k3)</label>
+    <select id="effortOpen">
+      <option value="low">low (дёшево/быстро)</option>
+      <option value="high">high</option>
+      <option value="max">max (дорого)</option>
+    </select>
+  </div>
+
+  <label for="prompt">Задание для модели</label>
+  <textarea id="prompt" placeholder="Например: посчитай выручку по строкам и добавь колонку с маржой. Ответ верни как таблицу с колонками через табуляцию."></textarea>
+  <div class="note">К запросу автоматически прикладывается содержимое выделенного диапазона ячеек.</div>
+
+  <button class="btn-primary" id="btnSend">Отправить выделенное + запрос</button>
+  <button class="btn-secondary" id="btnInsert">Вставить ответ в выделенную ячейку</button>
+  <button class="btn-secondary" id="btnSave">Сохранить ключ / настройки</button>
+
+  <div id="status"></div>
+  <div id="answer"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var CFG_KEY = "kimi-excel-cfg";
+  var lastAnswer = "";
+
+  var MODELS = {
+    open: [
+      { id: "kimi-k3", label: "kimi-k3 (флагман)" },
+      { id: "kimi-k2.7-code", label: "kimi-k2.7-code" },
+      { id: "kimi-k2.6", label: "kimi-k2.6" }
+    ],
+    sub: [
+      { id: "k3-256k", label: "k3-256k (256K контекст, Moderato+)" },
+      { id: "k3", label: "k3 (до 1M контекста, Allegretto+)" },
+      { id: "kimi-for-coding", label: "kimi-for-coding (K2.8, Andante+)" },
+      { id: "kimi-for-coding-highspeed", label: "kimi-for-coding-highspeed (K2.7, Pro)" }
+    ]
+  };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(msg, isErr) {
+    var el = $("status");
+    el.textContent = msg;
+    el.className = isErr ? "err" : "";
+  }
+
+  function fillModels(mode, keepValue) {
+    var sel = $("model");
+    sel.innerHTML = "";
+    MODELS[mode].forEach(function (m) {
+      var o = document.createElement("option");
+      o.value = m.id; o.textContent = m.label;
+      sel.appendChild(o);
+    });
+    if (keepValue) sel.value = keepValue;
+    if (!sel.value) sel.selectedIndex = 0;
+  }
+
+  function applyModeVisibility() {
+    var mode = $("mode").value;
+    document.body.className = mode === "sub" ? "mode-sub" : "mode-open";
+  }
+
+  function loadSettings() {
+    var cfg = {};
+    try { cfg = JSON.parse(localStorage.getItem(CFG_KEY) || "{}"); } catch (e) {}
+    if (cfg.key) $("apiKey").value = cfg.key;
+    if (cfg.mode) $("mode").value = cfg.mode;
+    applyModeVisibility();
+    fillModels($("mode").value, cfg.model);
+    if (cfg.effort) $("effort").value = cfg.effort;
+    if (cfg.effortOpen) $("effortOpen").value = cfg.effortOpen;
+  }
+
+  function saveSettings() {
+    localStorage.setItem(CFG_KEY, JSON.stringify({
+      key: $("apiKey").value.trim(),
+      mode: $("mode").value,
+      model: $("model").value,
+      effort: $("effort").value,
+      effortOpen: $("effortOpen").value
+    }));
+    setStatus("Сохранено.");
+  }
+
+  function readSelection() {
+    return Excel.run(function (context) {
+      var range = context.workbook.getSelectedRange();
+      range.load(["values", "address"]);
+      return context.sync().then(function () {
+        var text = range.values.map(function (row) {
+          return row.map(function (c) { return c === null ? "" : String(c); }).join("\t");
+        }).join("\n");
+        return { text: text, address: range.address };
+      });
+    });
+  }
+
+  // SSE-стриминг: универсальный парсер событий
+  function streamSSE(resp, onDelta) {
+    var reader = resp.body.getReader();
+    var decoder = new TextDecoder();
+    var buf = "";
+    var out = "";
+    function pump() {
+      return reader.read().then(function (res) {
+        if (res.done) return out;
+        buf += decoder.decode(res.value, { stream: true });
+        var lines = buf.split("\n");
+        buf = lines.pop();
+        var data = "";
+        lines.forEach(function (line) {
+          if (line.indexOf("data:") === 0) data += line.slice(5).trim() + "\n";
+          else if (line === "" && data) { handleData(data.trim()); data = ""; }
+        });
+        if (data) handleData(data.trim());
+        return pump();
+      });
+    }
+    function handleData(payload) {
+      if (!payload || payload === "[DONE]") return;
+      try {
+        var j = JSON.parse(payload);
+        var delta = onDelta(j);
+        if (delta) { out += delta; $("answer").textContent = out; }
+      } catch (e) {}
+    }
+    return pump();
+  }
+
+  // Режим Open Platform: OpenAI-совместимый api.moonshot.ai
+  function callOpenPlatform(key, model, effort, userContent) {
+    var body = {
+      model: model,
+      messages: [
+        { role: "system", content: "Ты — ассистент аналитика в Excel. Отвечай по делу. Если просят таблицу — строки через перенос строки, колонки через табуляцию, без Markdown-разметки." },
+        { role: "user", content: userContent }
+      ],
+      stream: true,
+      max_completion_tokens: 8192
+    };
+    if (model === "kimi-k3") body.reasoning_effort = effort;
+    return fetch("https://api.moonshot.ai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+      body: JSON.stringify(body)
+    }).then(function (resp) {
+      if (!resp.ok) return resp.text().then(function (t) { throw new Error("API " + resp.status + ": " + t.slice(0, 400)); });
+      if (!resp.body) throw new Error("Нет тела ответа (stream).");
+      return streamSSE(resp, function (j) {
+        var d = j.choices && j.choices[0] && j.choices[0].delta;
+        return d && d.content ? d.content : "";
+      });
+    });
+  }
+
+  // Режим подписки Kimi Code: Anthropic-совместимый api.kimi.ai/coding
+  function callKimiCode(key, model, effort, userContent) {
+    var body = {
+      model: model,
+      max_tokens: 8192,
+      stream: true,
+      thinking: { type: "adaptive" },
+      messages: [
+        { role: "user", content: "Ты — ассистент аналитика в Excel. Отвечай по делу. Если просят таблицу — строки через перенос строки, колонки через табуляцию, без Markdown-разметки.\n\n" + userContent }
+      ]
+    };
+    if (model.indexOf("k3") === 0) body.thinking = { type: "adaptive", effort: effort };
+    return fetch("https://api.kimi.ai/coding/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true"
+      },
+      body: JSON.stringify(body)
+    }).then(function (resp) {
+      if (!resp.ok) return resp.text().then(function (t) { throw new Error("API " + resp.status + ": " + t.slice(0, 400)); });
+      if (!resp.body) throw new Error("Нет тела ответа (stream).");
+      return streamSSE(resp, function (j) {
+        var d = j.type === "content_block_delta" && j.delta;
+        return d && d.type === "text_delta" ? d.text : "";
+      });
+    });
+  }
+
+  $("mode").onchange = function () {
+    fillModels(this.value);
+    applyModeVisibility();
+  };
+
+  $("btnSend").onclick = function () {
+    var key = $("apiKey").value.trim();
+    if (!key) { setStatus("Введите API-ключ.", true); return; }
+    var promptText = $("prompt").value.trim();
+    if (!promptText) { setStatus("Введите задание.", true); return; }
+
+    var mode = $("mode").value;
+    var model = $("model").value;
+    var effort = mode === "sub" ? $("effort").value : $("effortOpen").value;
+    $("btnSend").disabled = true;
+    $("answer").style.display = "block";
+    $("answer").textContent = "";
+    setStatus("Читаю выделенный диапазон...");
+
+    readSelection().then(function (sel) {
+      var content = "Задание: " + promptText +
+        "\n\nДанные из выделенного диапазона " + sel.address + ":\n" + sel.text;
+      setStatus("Отправляю в " + model + " (" + (mode === "sub" ? "подписка" : "Open Platform") + ")...");
+      return mode === "sub" ? callKimiCode(key, model, effort, content)
+                            : callOpenPlatform(key, model, effort, content);
+    }).then(function (text) {
+      lastAnswer = text;
+      $("answer").textContent = text;
+      setStatus("Готово. Можно вставить в лист кнопкой ниже.");
+    }).catch(function (err) {
+      setStatus("Ошибка: " + err.message, true);
+    }).then(function () {
+      $("btnSend").disabled = false;
+    });
+  };
+
+  $("btnInsert").onclick = function () {
+    if (!lastAnswer) { setStatus("Сначала получите ответ.", true); return; }
+    var rows = lastAnswer.split("\n").map(function (r) { return r.split("\t"); });
+    Excel.run(function (context) {
+      var range = context.workbook.getSelectedRange();
+      range.load("address");
+      return context.sync().then(function () {
+        var sheet = context.workbook.worksheets.getActiveWorksheet();
+        var target = sheet.getRange(range.address).getResizedRange(rows.length - 1, Math.max.apply(null, rows.map(function (r) { return r.length; })) - 1);
+        target.values = rows;
+        return context.sync();
+      });
+    }).then(function () {
+      setStatus("Вставлено в " + rows.length + " строк(у).");
+    }).catch(function (err) {
+      setStatus("Ошибка вставки: " + err.message, true);
+    });
+  };
+
+  $("btnSave").onclick = saveSettings;
+
+  Office.onReady(function () { loadSettings(); });
+})();
+</script>
+</body>
+</html>
